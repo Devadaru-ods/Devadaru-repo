@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Orange Pi Monitor</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding-top: 40px; margin: 0; }
+        .dashboard { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; max-width: 900px; margin: 0 auto; padding: 0 20px; }
+        .card { background: #1e293b; padding: 25px; border-radius: 16px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); width: 240px; text-align: left; }
+        .card h3 { margin: 0 0 10px 0; color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .card .value { font-size: 1.8rem; font-weight: bold; color: #38bdf8; }
+
+        /* Стилизация карточек хоста */
+        .card.cpu-temp-card h3 { color: #f97316; }
+        .card.cpu-temp-card .value { color: #f97316; }
+
+        .card.cpu-usage-card h3 { color: #e11d48; }
+        .card.cpu-usage-card .value { color: #e11d48; }
+
+        .system-time { margin-bottom: 30px; font-size: 1.1rem; color: #64748b; }
+        h1 { margin-bottom: 5px; color: #f8fafc; }
+
+        /* Прогресс-бары */
+        .progress-container { background: #334155; border-radius: 8px; height: 12px; margin-top: 15px; overflow: hidden; }
+        .progress-bar { height: 100%; width: 0; transition: width 0.5s ease; }
+
+        .progress-bar.cpu-bar { background: #e11d48; }
+        .progress-bar.mem-bar { background: #38bdf8; }
+
+        .mem-details { margin-top: 5px; font-size: 0.85rem; color: #64748b; display: flex; justify-content: space-between; }
+    </style>
+</head>
+<body>
+<h1>Мониторинг Сервера Orange Pi 🍊</h1>
+<div class="system-time">Время на плате: <span id="time">Синхронизация...</span></div>
+
+<div class="dashboard">
+    <!-- КАРТОЧКА 1: Температура процессора -->
+    <div class="card cpu-temp-card">
+        <h3>CPU Температура</h3>
+        <div class="value" id="cpu-temp">--.- °C</div>
+    </div>
+
+    <!-- КАРТОЧКА 2: Загрузка процессора -->
+    <div class="card cpu-usage-card">
+        <h3>CPU Загрузка</h3>
+        <div class="value"><span id="cpu-usage-txt">--.-</span> %</div>
+        <div class="progress-container">
+            <div class="progress-bar cpu-bar" id="cpu-bar"></div>
+        </div>
+    </div>
+
+    <!-- КАРТОЧКА 3: Оперативная память -->
+    <div class="card">
+        <h3>Оперативная память</h3>
+        <div class="value" id="mem-percent">--.- %</div>
+        <div class="progress-container">
+            <div class="progress-bar mem-bar" id="mem-bar"></div>
+        </div>
+        <div class="mem-details">
+            <span id="mem-used">--- МБ</span>
+            <span id="mem-total">--- МБ</span>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Переменная для хранения активного сетевого канала SSE
+    let eventSource = null;
+
+    // Главная функция управления подключением к серверу Orange Pi
+    function connect() {
+        // Если предыдущее соединение зависло или сломалось — принудительно закрываем его
+        if (eventSource !== null) {
+            eventSource.close();
+        }
+
+        // Открываем новый реактивный поток данных к бэкенду Spring Boot
+        eventSource = new EventSource('/api/sse-stream');
+
+        // СОБЫТИЕ: Успешный прием свежего пакета данных в формате JSON
+        eventSource.onmessage = function(event) {
+            // Парсим текстовую строку JSON в удобный JavaScript-объект
+            const data = JSON.parse(event.data);
+
+            // Обновляем системное время в шапке дашборда
+            document.getElementById('time').innerText = data.timestamp;
+
+            // Карточка 1: Температура процессора CPU
+            document.getElementById('cpu-temp').innerText = data.cpuTemp;
+
+            // Карточка 2: Загрузка процессора CPU (текст и шкала прогресс-бара)
+            document.getElementById('cpu-usage-txt').innerText = data.cpuUsage.toFixed(1);
+            document.getElementById('cpu-bar').style.width = data.cpuUsage + '%';
+
+            // Карточка 3: Процент занятой оперативной памяти RAM
+            document.getElementById('mem-percent').innerText = data.memory.percentUsed.toFixed(1) + ' %';
+            // Карточка 3: Детализация мегабайт ОЗУ (Занято / Всего)
+            document.getElementById('mem-used').innerText = data.memory.usedMb + ' МБ';
+            document.getElementById('mem-total').innerText = data.memory.totalMb + ' МБ';
+            // Карточка 3: Длина полоски прогресс-бара оперативной памяти
+            document.getElementById('mem-bar').style.width = data.memory.percentUsed + '%';
+        };
+
+        // СОБЫТИЕ: Полный обрыв связи (происходит в момент перезагрузки платы)
+        eventSource.onerror = function() {
+            // Выводим предупреждение пользователю вместо времени
+            document.getElementById('time').innerText = 'Ошибка связи. Переподключение...';
+
+            // Физически уничтожаем битую сессию сокета
+            eventSource.close();
+
+            // Таймер автореконнекта: ждем строго 3 секунды и пробуем подключиться заново
+            setTimeout(function() {
+                connect();
+            }, 3000);
+        };
+    }
+
+    // Запуск инициализации соединения при самом первом открытии сайта в браузере
+    connect();
+</script>
+
+</body>
+</html>
