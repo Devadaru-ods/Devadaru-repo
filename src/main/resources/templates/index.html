@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>Orange Pi Monitor</title>
@@ -10,7 +10,7 @@
         .card h3 { margin: 0 0 10px 0; color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; }
         .card .value { font-size: 1.8rem; font-weight: bold; color: #38bdf8; }
 
-        /* Стилизация карточек хоста */
+        /* Custom styling for host cards */
         .card.cpu-temp-card h3 { color: #f97316; }
         .card.cpu-temp-card .value { color: #f97316; }
 
@@ -20,7 +20,7 @@
         .system-time { margin-bottom: 30px; font-size: 1.1rem; color: #64748b; }
         h1 { margin-bottom: 5px; color: #f8fafc; }
 
-        /* Прогресс-бары */
+        /* Progress Bars */
         .progress-container { background: #334155; border-radius: 8px; height: 12px; margin-top: 15px; overflow: hidden; }
         .progress-bar { height: 100%; width: 0; transition: width 0.5s ease; }
 
@@ -31,95 +31,93 @@
     </style>
 </head>
 <body>
-<h1>Мониторинг Сервера Orange Pi 🍊</h1>
-<div class="system-time">Время на плате: <span id="time">Синхронизация...</span></div>
+
+<h1>Orange Pi Server Monitor</h1>
+<div class="system-time">Server Time: <span id="time">Connecting...</span></div>
 
 <div class="dashboard">
-    <!-- КАРТОЧКА 1: Температура процессора -->
+    <!-- Card 1: CPU Temperature -->
     <div class="card cpu-temp-card">
-        <h3>CPU Температура</h3>
+        <h3>CPU Temperature</h3>
         <div class="value" id="cpu-temp">--.- °C</div>
     </div>
 
-    <!-- КАРТОЧКА 2: Загрузка процессора -->
+    <!-- Card 2: CPU Load -->
     <div class="card cpu-usage-card">
-        <h3>CPU Загрузка</h3>
-        <div class="value"><span id="cpu-usage-txt">--.-</span> %</div>
+        <h3>CPU Load</h3>
+        <div class="value"><span id="cpu-usage-txt">0.0</span> %</div>
         <div class="progress-container">
             <div class="progress-bar cpu-bar" id="cpu-bar"></div>
         </div>
     </div>
 
-    <!-- КАРТОЧКА 3: Оперативная память -->
+    <!-- Card 3: RAM State -->
     <div class="card">
-        <h3>Оперативная память</h3>
-        <div class="value" id="mem-percent">--.- %</div>
+        <h3>RAM Usage</h3>
+        <div class="value" id="mem-percent">0.0 %</div>
         <div class="progress-container">
             <div class="progress-bar mem-bar" id="mem-bar"></div>
         </div>
         <div class="mem-details">
-            <span id="mem-used">--- МБ</span>
-            <span id="mem-total">--- МБ</span>
+            <span id="mem-used">0 MB</span>
+            <span id="mem-total">0 MB</span>
         </div>
     </div>
 </div>
 
 <script>
-    // Переменная для хранения активного сетевого канала SSE
+    // Active SSE network stream container
     let eventSource = null;
 
-    // Главная функция управления подключением к серверу Orange Pi
+    // Main network connection supervisor
     function connect() {
-        // Если предыдущее соединение зависло или сломалось — принудительно закрываем его
+        // Clean up old or stuck sockets before initializing a new one
         if (eventSource !== null) {
             eventSource.close();
         }
 
-        // Открываем новый реактивный поток данных к бэкенду Spring Boot
+        // Establish reactive stream to Spring Boot backend
         eventSource = new EventSource('/api/sse-stream');
 
-        // СОБЫТИЕ: Успешный прием свежего пакета данных в формате JSON
+        // EVENT: Successfully received live telemetry payload
         eventSource.onmessage = function(event) {
-            // Парсим текстовую строку JSON в удобный JavaScript-объект
+            // Parse incoming JSON string into a live JavaScript object
             const data = JSON.parse(event.data);
 
-            // Обновляем системное время в шапке дашборда
+            // Update header system time
             document.getElementById('time').innerText = data.timestamp;
 
-            // Карточка 1: Температура процессора CPU
+            // Card 1: Update CPU Temperature
             document.getElementById('cpu-temp').innerText = data.cpuTemp;
 
-            // Карточка 2: Загрузка процессора CPU (текст и шкала прогресс-бара)
+            // Card 2: Update CPU Load values and animate progress bar
             document.getElementById('cpu-usage-txt').innerText = data.cpuUsage.toFixed(1);
             document.getElementById('cpu-bar').style.width = data.cpuUsage + '%';
 
-            // Карточка 3: Процент занятой оперативной памяти RAM
+            // Card 3: Update RAM percent text, detailed megabytes, and bar width
             document.getElementById('mem-percent').innerText = data.memory.percentUsed.toFixed(1) + ' %';
-            // Карточка 3: Детализация мегабайт ОЗУ (Занято / Всего)
-            document.getElementById('mem-used').innerText = data.memory.usedMb + ' МБ';
-            document.getElementById('mem-total').innerText = data.memory.totalMb + ' МБ';
-            // Карточка 3: Длина полоски прогресс-бара оперативной памяти
+            document.getElementById('mem-used').innerText = data.memory.usedMb + ' MB';
+            document.getElementById('mem-total').innerText = data.memory.totalMb + ' MB';
             document.getElementById('mem-bar').style.width = data.memory.percentUsed + '%';
         };
 
-        // СОБЫТИЕ: Полный обрыв связи (происходит в момент перезагрузки платы)
+        // EVENT: Connection dropped (e.g., host reboot)
         eventSource.onerror = function() {
-            // Выводим предупреждение пользователю вместо времени
-            document.getElementById('time').innerText = 'Ошибка связи. Переподключение...';
+            // Notify user via status header
+            document.getElementById('time').innerText = 'Connection lost. Reconnecting...';
 
-            // Физически уничтожаем битую сессию сокета
+            // Destruct dead socket session
             eventSource.close();
 
-            // Таймер автореконнекта: ждем строго 3 секунды и пробуем подключиться заново
+            // Auto-reconnect loop: retry every 3 seconds until host comes online
             setTimeout(function() {
                 connect();
             }, 3000);
         };
     }
 
-    // Запуск инициализации соединения при самом первом открытии сайта в браузере
+    // Initialize background network link on page load
     connect();
 </script>
-
 </body>
 </html>
