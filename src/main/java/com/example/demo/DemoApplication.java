@@ -58,35 +58,66 @@ public class DemoApplication {
     // Метод парсинга /proc/meminfo для получения точных мегабайт ОЗУ
     private MemoryMetrics getMemoryMetrics() {
         try {
-            var lines = Files.readAllLines(Paths.get("/proc/meminfo"));
-            long totalKb = 0, availableKb = 0;
-            for (String line : lines) {
-                if (line.startsWith("MemTotal:")) totalKb = Long.parseLong(line.replaceAll("[^0-9]", ""));
-                else if (line.startsWith("MemAvailable:")) availableKb = Long.parseLong(line.replaceAll("[^0-9]", ""));
-            }
+            long[] memData = Files.readAllLines(Paths.get("/proc/meminfo")).stream()
+                    // 1. Фильтруем строки: оставляем только MemTotal и MemAvailable
+                    .filter(line -> line.startsWith("MemTotal:") || line.startsWith("MemAvailable:"))
+                    // 2. Очищаем строку от букв и пробелов, оставляя только цифры
+                    .map(line -> line.replaceAll("[^0-9]", ""))
+                    // 3. Парсим оставшийся текст в примитивное число long
+                    .mapToLong(Long::parseLong)
+                    // 4. Собираем в массив: [0] будет MemTotal, [1] будет MemAvailable
+                    .toArray();
+
+            // Безопасная проверка: если Linux вернул не все данные, отдаем заглушку
+            if (memData.length < 2) return new MemoryMetrics(544, 4096, 13.2);
+
+            long totalKb = memData[0];
+            long availableKb = memData[1];
+
             int totalMb = (int) (totalKb / 1024);
             int usedMb = totalMb - (int) (availableKb / 1024);
-            return new MemoryMetrics(usedMb, totalMb, ((double) usedMb / totalMb) * 100.0);
+            double percentUsed = ((double) usedMb / totalMb) * 100.0;
+
+            return new MemoryMetrics(usedMb, totalMb, percentUsed);
+
         } catch (Exception e) {
-            return new MemoryMetrics(544, 4096, 13.2); // Дефолтная заглушка для ПК
+            // Дефолтная заглушка для ПК в случае ошибки чтения файла
+            return new MemoryMetrics(544, 4096, 13.2);
         }
     }
+
 
     // Метод расчета честной загрузки CPU на основе дельты тиков ядра Linux
     private double calculateCpuUsage() {
         try {
             String firstLine;
-            // try-with-resources автоматически закроет файловый стрим Linux после прочтения строки
             try (var stream = Files.lines(Paths.get("/proc/stat"))) {
                 firstLine = stream.findFirst().orElse("");
             }
 
-            if (!firstLine.startsWith("cpu ")) return 0.0;
-            String[] t = firstLine.trim().split("\\s+");
+            if (!firstLine.startsWith("cpu")) return 0.0;
 
-            long total = Long.parseLong(t[1]) + Long.parseLong(t[2]) + Long.parseLong(t[3]) +
-                    Long.parseLong(t[4]) + Long.parseLong(t[5]) + Long.parseLong(t[6]) + Long.parseLong(t[7]);
-            long idleTime = Long.parseLong(t[4]) + Long.parseLong(t[5]);
+            // Посимвольный разрез без регулярных выражений (работает со скоростью Си)
+            var tokenizer = new java.util.StringTokenizer(firstLine.trim());
+
+            // Пропускаем первое слово "cpu"
+            if (tokenizer.hasMoreTokens()) tokenizer.nextToken();
+
+            long total = 0;
+            long idleTime = 0;
+            int index = 0;
+
+            while (tokenizer.hasMoreTokens() && index < 7) {
+                long tick = Long.parseLong(tokenizer.nextToken());
+                total += tick;
+
+                if (index == 3 || index == 4) { // idle (3) и iowait (4)
+                    idleTime += tick;
+                }
+                index++;
+            }
+
+            if (index < 7) return 0.0;
 
             long totalDelta = total - prevTotal;
             long idleDelta = idleTime - prevIdle;
@@ -96,11 +127,12 @@ public class DemoApplication {
 
             return totalDelta == 0 ? 0.0 : Math.clamp(100.0 * (totalDelta - idleDelta) / totalDelta, 0.0, 100.0);
 
-
         } catch (Exception e) {
             return ThreadLocalRandom.current().nextDouble(0.5, 2.5);
         }
     }
+
+
 
 
     // Планировщик: собирает реальные параметры железа раз в 2 секунды и отправляет в браузеры
@@ -126,9 +158,9 @@ public class DemoApplication {
     @GetMapping(value = "/api/sse-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamMetrics() {
         var emitter = new SseEmitter(1800000L); // Таймаут 30 минут
-        emitters.add(emitter);
         emitter.onCompletion(() -> emitters.remove(emitter));
         emitter.onTimeout(() -> emitters.remove(emitter));
+        emitters.add(emitter);
         return emitter;
     }
 
