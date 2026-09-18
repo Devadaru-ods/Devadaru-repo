@@ -16,7 +16,15 @@ A lightweight, high-performance reactive telemetry dashboard engineered for ARM-
 * **Fail-Safe & DOM-Optimized Frontend:** Developed in pure **Vanilla JavaScript (HTML5)** with pre-cached DOM element references and safe JSON parsing. Includes an automated connection lifecycle supervisor that handles host reboots or network drops with silent auto-reconnection every 3 seconds.
 * **Enterprise Infrastructure Layer:** Fully containerized with **Docker & Docker Compose**, operating seamlessly behind a **Caddy Reverse Proxy** for network isolation and automated routing.
 
-## 🛠 Tech Stack
+
+```mermaid
+graph LR
+    Client[Client Browser] -->|SSE / HTTPS| Caddy[Caddy Reverse Proxy]
+    Caddy -->|Docker Bridge 172.18.0.1:8080| Java[Java 21 Spring Boot]
+    Java -->|JNI Native| MXBean[OperatingSystemMXBean]
+    Java -->|BufferedReader| Proc["/proc/meminfo"]
+    Java -->|Sysfs Read| Temp["/sys/class/thermal"]
+```
 
 * **Backend:** Java 21 (Eclipse Temurin), Spring Boot 3.x, Maven, Spring Scheduling
 * **Frontend:** Vanilla JS (DOM-cached), HTML5, CSS3 (Flexbox Layout, Hardware-Accelerated Transitions)
