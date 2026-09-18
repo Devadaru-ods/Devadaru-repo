@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Orange Pi Monitor</title>
     <style>
         body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding-top: 40px; margin: 0; }
@@ -10,17 +11,13 @@
         .card h3 { margin: 0 0 10px 0; color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; }
         .card .value { font-size: 1.8rem; font-weight: bold; color: #38bdf8; }
 
-        /* Custom styling for host cards */
-        .card.cpu-temp-card h3 { color: #f97316; }
-        .card.cpu-temp-card .value { color: #f97316; }
+        .card.cpu-temp-card h3, .card.cpu-temp-card .value { color: #f97316; }
+        .card.cpu-usage-card h3, .card.cpu-usage-card .value { color: #e11d48; }
 
-        .card.cpu-usage-card h3 { color: #e11d48; }
-        .card.cpu-usage-card .value { color: #e11d48; }
-
-        .system-time { margin-bottom: 30px; font-size: 1.1rem; color: #64748b; }
+        .system-time { margin-bottom: 30px; font-size: 1.1rem; color: #64748b; transition: color 0.3s; }
+        .system-time.error { color: #ef4444; }
         h1 { margin-bottom: 5px; color: #f8fafc; }
 
-        /* Progress Bars */
         .progress-container { background: #334155; border-radius: 8px; height: 12px; margin-top: 15px; overflow: hidden; }
         .progress-bar { height: 100%; width: 0; transition: width 0.5s ease; }
 
@@ -31,18 +28,15 @@
     </style>
 </head>
 <body>
-
 <h1>Orange Pi Server Monitor</h1>
-<div class="system-time">Server Time: <span id="time">Connecting...</span></div>
+<div class="system-time" id="status-container">Server Time: <span id="time">Connecting...</span></div>
 
 <div class="dashboard">
-    <!-- Card 1: CPU Temperature -->
     <div class="card cpu-temp-card">
         <h3>CPU Temperature</h3>
         <div class="value" id="cpu-temp">--.- °C</div>
     </div>
 
-    <!-- Card 2: CPU Load -->
     <div class="card cpu-usage-card">
         <h3>CPU Load</h3>
         <div class="value"><span id="cpu-usage-txt">0.0</span> %</div>
@@ -51,7 +45,6 @@
         </div>
     </div>
 
-    <!-- Card 3: RAM State -->
     <div class="card">
         <h3>RAM Usage</h3>
         <div class="value" id="mem-percent">0.0 %</div>
@@ -66,57 +59,59 @@
 </div>
 
 <script>
-    // Active SSE network stream container
+    // Кэшируем ссылки на элементы один раз при загрузке страницы
+    const elTime = document.getElementById('time');
+    const elStatusContainer = document.getElementById('status-container');
+    const elCpuTemp = document.getElementById('cpu-temp');
+    const elCpuUsageTxt = document.getElementById('cpu-usage-txt');
+    const elCpuBar = document.getElementById('cpu-bar');
+    const elMemPercent = document.getElementById('mem-percent');
+    const elMemUsed = document.getElementById('mem-used');
+    const elMemTotal = document.getElementById('mem-total');
+    const elMemBar = document.getElementById('mem-bar');
+
     let eventSource = null;
 
-    // Main network connection supervisor
     function connect() {
-        // Clean up old or stuck sockets before initializing a new one
         if (eventSource !== null) {
             eventSource.close();
         }
 
-        // Establish reactive stream to Spring Boot backend
         eventSource = new EventSource('/api/sse-stream');
 
-        // EVENT: Successfully received live telemetry payload
-        eventSource.onmessage = function(event) {
-            // Parse incoming JSON string into a live JavaScript object
-            const data = JSON.parse(event.data);
-
-            // Update header system time
-            document.getElementById('time').innerText = data.timestamp;
-
-            // Card 1: Update CPU Temperature
-            document.getElementById('cpu-temp').innerText = data.cpuTemp;
-
-            // Card 2: Update CPU Load values and animate progress bar
-            document.getElementById('cpu-usage-txt').innerText = data.cpuUsage.toFixed(1);
-            document.getElementById('cpu-bar').style.width = data.cpuUsage + '%';
-
-            // Card 3: Update RAM percent text, detailed megabytes, and bar width
-            document.getElementById('mem-percent').innerText = data.memory.percentUsed.toFixed(1) + ' %';
-            document.getElementById('mem-used').innerText = data.memory.usedMb + ' MB';
-            document.getElementById('mem-total').innerText = data.memory.totalMb + ' MB';
-            document.getElementById('mem-bar').style.width = data.memory.percentUsed + '%';
+        // Сбрасываем статус ошибки при восстановлении соединения
+        eventSource.onopen = () => {
+            elStatusContainer.classList.remove('error');
         };
 
-        // EVENT: Connection dropped (e.g., host reboot)
-        eventSource.onerror = function() {
-            // Notify user via status header
-            document.getElementById('time').innerText = 'Connection lost. Reconnecting...';
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
 
-            // Destruct dead socket session
+                elTime.innerText = data.timestamp;
+                elCpuTemp.innerText = data.cpuTemp;
+
+                elCpuUsageTxt.innerText = data.cpuUsage.toFixed(1);
+                elCpuBar.style.width = Math.min(Math.max(data.cpuUsage, 0), 100) + '%';
+
+                elMemPercent.innerText = data.memory.percentUsed.toFixed(1) + ' %';
+                elMemUsed.innerText = data.memory.usedMb + ' MB';
+                elMemTotal.innerText = data.memory.totalMb + ' MB';
+                elMemBar.style.width = Math.min(Math.max(data.memory.percentUsed, 0), 100) + '%';
+            } catch (err) {
+                console.error("Ошибка парсинга данных SSE:", err);
+            }
+        };
+
+        eventSource.onerror = () => {
+            elStatusContainer.classList.add('error');
+            elTime.innerText = 'Connection lost. Reconnecting...';
+
             eventSource.close();
-
-            // Auto-reconnect loop: retry every 3 seconds until host comes online
-            setTimeout(function() {
-                connect();
-            }, 3000);
+            setTimeout(connect, 3000);
         };
     }
 
-    // Initialize background network link on page load
     connect();
 </script>
 </body>

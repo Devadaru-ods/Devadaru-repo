@@ -1,5 +1,6 @@
 package com.example.demo;
 
+import com.sun.management.OperatingSystemMXBean;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.core.io.ClassPathResource;
@@ -11,13 +12,14 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -26,18 +28,29 @@ import java.util.concurrent.ThreadLocalRandom;
 @RestController
 public class DemoApplication {
 
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
+
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
-    private long prevIdle = 0;
-    private long prevTotal = 0;
+    private final String indexHtml;
+
+    // MXBean системы для получения загрузки CPU без I/O нагрузок
+    private final OperatingSystemMXBean osBean =
+            (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+
+    // Кэшируем HTML-шаблон в память один раз при запуске приложения
+    public DemoApplication() throws IOException {
+        var resource = new ClassPathResource("templates/index.html");
+        this.indexHtml = resource.getContentAsString(StandardCharsets.UTF_8);
+    }
 
     public static void main(String[] args) {
         SpringApplication.run(DemoApplication.class, args);
     }
 
-    // Легковесный Record для хранения данных оперативной памяти
+    // Record для хранения данных оперативной памяти
     public record MemoryMetrics(int usedMb, int totalMb, double percentUsed) {}
 
-    // Основной Record, содержащий только системные метрики Orange Pi
+    // Основной Record с системными метриками
     public record ServerMetrics(
             String timestamp,
             String cpuTemp,
@@ -45,129 +58,107 @@ public class DemoApplication {
             MemoryMetrics memory
     ) {}
 
-    // Метод чтения реальной температуры процессора Allwinner
+    // Чтение температуры процессора с локалью US (для точки в десятичных дробях)
     private String getCpuTemperature() {
         try {
-            var content = Files.readString(Paths.get("/sys/class/thermal/thermal_zone0/temp")).trim();
-            return String.format("%.1f °C", Double.parseDouble(content) / 1000.0);
+            String tempRaw = Files.readString(Path.of("/sys/class/thermal/thermal_zone0/temp")).trim();
+            return String.format(Locale.US, "%.1f °C", Double.parseDouble(tempRaw) / 1000.0);
         } catch (Exception e) {
-            return String.format("%.1f °C", ThreadLocalRandom.current().nextDouble(34.0, 36.5));
+            return String.format(Locale.US, "%.1f °C", ThreadLocalRandom.current().nextDouble(34.0, 36.5));
         }
     }
 
-    // Метод парсинга /proc/meminfo для получения точных мегабайт ОЗУ
+    // Метод расчета памяти по точной формуле htop
     private MemoryMetrics getMemoryMetrics() {
-        try {
-            long[] memData = Files.readAllLines(Paths.get("/proc/meminfo")).stream()
-                    // 1. Фильтруем строки: оставляем только MemTotal и MemAvailable
-                    .filter(line -> line.startsWith("MemTotal:") || line.startsWith("MemAvailable:"))
-                    // 2. Очищаем строку от букв и пробелов, оставляя только цифры
-                    .map(line -> line.replaceAll("[^0-9]", ""))
-                    // 3. Парсим оставшийся текст в примитивное число long
-                    .mapToLong(Long::parseLong)
-                    // 4. Собираем в массив: [0] будет MemTotal, [1] будет MemAvailable
-                    .toArray();
+        try (var reader = Files.newBufferedReader(Path.of("/proc/meminfo"))) {
+            long totalKb = 0, freeKb = 0, buffersKb = 0, cachedKb = 0, reclaimableKb = 0, shmemKb = 0;
+            String line;
 
-            // Безопасная проверка: если Linux вернул не все данные, отдаем заглушку
-            if (memData.length < 2) return new MemoryMetrics(544, 4096, 13.2);
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith("MemTotal:")) totalKb = parseKbValue(line);
+                else if (line.startsWith("MemFree:")) freeKb = parseKbValue(line);
+                else if (line.startsWith("Buffers:")) buffersKb = parseKbValue(line);
+                else if (line.startsWith("Cached:")) cachedKb = parseKbValue(line);
+                else if (line.startsWith("SReclaimable:")) reclaimableKb = parseKbValue(line);
+                else if (line.startsWith("Shmem:")) shmemKb = parseKbValue(line);
+            }
 
-            long totalKb = memData[0];
-            long availableKb = memData[1];
+            if (totalKb == 0) return new MemoryMetrics(544, 4096, 13.2);
+
+            // Точная формула расчета "Used" из исходного кода htop
+            long usedKb = totalKb - freeKb - buffersKb - (cachedKb + reclaimableKb - shmemKb);
 
             int totalMb = (int) (totalKb / 1024);
-            int usedMb = totalMb - (int) (availableKb / 1024);
+            int usedMb = (int) (usedKb / 1024);
             double percentUsed = ((double) usedMb / totalMb) * 100.0;
 
             return new MemoryMetrics(usedMb, totalMb, percentUsed);
-
         } catch (Exception e) {
-            // Дефолтная заглушка для ПК в случае ошибки чтения файла
             return new MemoryMetrics(544, 4096, 13.2);
         }
     }
 
+    // Быстрое извлечение числа из строки /proc/meminfo
+    private long parseKbValue(String line) {
+        String[] parts = line.trim().split("\\s+");
+        return parts.length >= 2 ? Long.parseLong(parts[1]) : 0;
+    }
 
-    // Метод расчета честной загрузки CPU на основе дельты тиков ядра Linux
+    // Загрузка CPU через OperatingSystemMXBean
     private double calculateCpuUsage() {
         try {
-            String firstLine;
-            try (var stream = Files.lines(Paths.get("/proc/stat"))) {
-                firstLine = stream.findFirst().orElse("");
+            double systemCpuLoad = osBean.getCpuLoad();
+
+            if (systemCpuLoad < 0) {
+                return ThreadLocalRandom.current().nextDouble(0.5, 2.5);
             }
 
-            if (!firstLine.startsWith("cpu")) return 0.0;
-
-            // Посимвольный разрез без регулярных выражений (работает со скоростью Си)
-            var tokenizer = new java.util.StringTokenizer(firstLine.trim());
-
-            // Пропускаем первое слово "cpu"
-            if (tokenizer.hasMoreTokens()) tokenizer.nextToken();
-
-            long total = 0;
-            long idleTime = 0;
-            int index = 0;
-
-            while (tokenizer.hasMoreTokens() && index < 7) {
-                long tick = Long.parseLong(tokenizer.nextToken());
-                total += tick;
-
-                if (index == 3 || index == 4) { // idle (3) и iowait (4)
-                    idleTime += tick;
-                }
-                index++;
-            }
-
-            if (index < 7) return 0.0;
-
-            long totalDelta = total - prevTotal;
-            long idleDelta = idleTime - prevIdle;
-
-            prevTotal = total;
-            prevIdle = idleTime;
-
-            return totalDelta == 0 ? 0.0 : Math.clamp(100.0 * (totalDelta - idleDelta) / totalDelta, 0.0, 100.0);
-
+            return Math.clamp(systemCpuLoad * 100.0, 0.0, 100.0);
         } catch (Exception e) {
             return ThreadLocalRandom.current().nextDouble(0.5, 2.5);
         }
     }
 
-
-
-
-    // Планировщик: собирает реальные параметры железа раз в 2 секунды и отправляет в браузеры
+    // Планировщик сборки и рассылки метрик
     @Scheduled(fixedRate = 2000)
     public void collectServerMetrics() {
-        if (emitters.isEmpty()) return; // Экономим ресурсы процессора Allwinner, если никто не открыл сайт
+        if (emitters.isEmpty()) return;
 
-        var now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
+        var now = LocalDateTime.now().format(DATE_FORMATTER);
         var metrics = new ServerMetrics(now, getCpuTemperature(), calculateCpuUsage(), getMemoryMetrics());
 
-        List<SseEmitter> dead = new ArrayList<>();
-        for (var emitter : emitters) {
+        // Единоразовая сериализация JSON для всех подписчиков
+        SseEmitter.SseEventBuilder event = SseEmitter.event()
+                .data(metrics, MediaType.APPLICATION_JSON);
+
+        // Безопасное удаление неактивных соединений
+        emitters.removeIf(emitter -> {
             try {
-                emitter.send(metrics, MediaType.APPLICATION_JSON);
+                emitter.send(event);
+                return false;
             } catch (IOException e) {
-                dead.add(emitter);
+                return true;
             }
-        }
-        emitters.removeAll(dead);
+        });
     }
 
-    // Эндпоинт для подключения SSE-клиента (браузера)
+    // Эндпоинт для подключения SSE-клиентов
     @GetMapping(value = "/api/sse-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamMetrics() {
         var emitter = new SseEmitter(1800000L); // Таймаут 30 минут
-        emitter.onCompletion(() -> emitters.remove(emitter));
-        emitter.onTimeout(() -> emitters.remove(emitter));
+
+        Runnable removeAction = () -> emitters.remove(emitter);
+        emitter.onCompletion(removeAction);
+        emitter.onTimeout(removeAction);
+        emitter.onError(e -> removeAction.run());
+
         emitters.add(emitter);
         return emitter;
     }
 
-    // Раздача статического HTML-шаблона из ресурсов
+    // Раздача скэшированного HTML
     @GetMapping(value = "/", produces = MediaType.TEXT_HTML_VALUE)
-    public String home() throws IOException {
-        var resource = new ClassPathResource("templates/index.html");
-        return resource.getContentAsString(StandardCharsets.UTF_8);
+    public String home() {
+        return indexHtml;
     }
 }
