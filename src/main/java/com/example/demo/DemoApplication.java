@@ -8,6 +8,7 @@ import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -32,13 +33,15 @@ public class DemoApplication {
 
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
     private final String indexHtml;
+    private final MetricRepository metricRepository;
 
     // MXBean системы для получения загрузки CPU без I/O нагрузок
     private final OperatingSystemMXBean osBean =
             (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
 
-    // Кэшируем HTML-шаблон в память один раз при запуске приложения
-    public DemoApplication() throws IOException {
+    // Внедряем MetricRepository через конструктор
+    public DemoApplication(MetricRepository metricRepository) throws IOException {
+        this.metricRepository = metricRepository;
         var resource = new ClassPathResource("templates/index.html");
         this.indexHtml = resource.getContentAsString(StandardCharsets.UTF_8);
     }
@@ -85,7 +88,6 @@ public class DemoApplication {
 
             if (totalKb == 0) return new MemoryMetrics(544, 4096, 13.2);
 
-            // Точная формула расчета "Used" из исходного кода htop
             long usedKb = totalKb - freeKb - buffersKb - (cachedKb + reclaimableKb - shmemKb);
 
             int totalMb = (int) (totalKb / 1024);
@@ -98,40 +100,47 @@ public class DemoApplication {
         }
     }
 
-    // Быстрое извлечение числа из строки /proc/meminfo
     private long parseKbValue(String line) {
         String[] parts = line.trim().split("\\s+");
         return parts.length >= 2 ? Long.parseLong(parts[1]) : 0;
     }
 
-    // Загрузка CPU через OperatingSystemMXBean
     private double calculateCpuUsage() {
         try {
             double systemCpuLoad = osBean.getCpuLoad();
-
             if (systemCpuLoad < 0) {
                 return ThreadLocalRandom.current().nextDouble(0.5, 2.5);
             }
-
             return Math.clamp(systemCpuLoad * 100.0, 0.0, 100.0);
         } catch (Exception e) {
             return ThreadLocalRandom.current().nextDouble(0.5, 2.5);
         }
     }
 
-    // Планировщик сборки и рассылки метрик
+    // Планировщик сборки, рассылки метрик и сохранения в SQLite (в оперативной памяти)
     @Scheduled(fixedRate = 2000)
     public void collectServerMetrics() {
+        var now = LocalDateTime.now();
+        var formattedTime = now.format(DATE_FORMATTER);
+
+        String tempStr = getCpuTemperature();
+        double cpuUsage = calculateCpuUsage();
+        MemoryMetrics mem = getMemoryMetrics();
+
+        // --- СОХРАНЕНИЕ В SQLITE IN-MEMORY ---
+        try {
+            double tempVal = Double.parseDouble(tempStr.replace(" °C", "").replace(",", "."));
+            metricRepository.save(new ServerMetric(now, tempVal, cpuUsage, mem.percentUsed()));
+        } catch (Exception ignored) {}
+        // -------------------------------------
+
         if (emitters.isEmpty()) return;
 
-        var now = LocalDateTime.now().format(DATE_FORMATTER);
-        var metrics = new ServerMetrics(now, getCpuTemperature(), calculateCpuUsage(), getMemoryMetrics());
+        var metrics = new ServerMetrics(formattedTime, tempStr, cpuUsage, mem);
 
-        // Единоразовая сериализация JSON для всех подписчиков
         SseEmitter.SseEventBuilder event = SseEmitter.event()
                 .data(metrics, MediaType.APPLICATION_JSON);
 
-        // Безопасное удаление неактивных соединений
         emitters.removeIf(emitter -> {
             try {
                 emitter.send(event);
@@ -140,6 +149,20 @@ public class DemoApplication {
                 return true;
             }
         });
+    }
+
+    // Новый эндпоинт для проверки накопленной истории из SQLite (RAM)
+    @GetMapping("/api/metrics")
+    @ResponseBody
+    public List<ServerMetric> getMetricsHistory() {
+        return metricRepository.findAll();
+    }
+
+    // Новый эндпоинт для проверки количества записей в SQLite (RAM)
+    @GetMapping("/api/count")
+    @ResponseBody
+    public long getCount() {
+        return metricRepository.count();
     }
 
     // Эндпоинт для подключения SSE-клиентов
