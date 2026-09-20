@@ -88,6 +88,7 @@ public class DemoApplication {
 
             if (totalKb == 0) return new MemoryMetrics(544, 4096, 13.2);
 
+            // Точная формула расчета "Used" из исходного кода htop
             long usedKb = totalKb - freeKb - buffersKb - (cachedKb + reclaimableKb - shmemKb);
 
             int totalMb = (int) (totalKb / 1024);
@@ -100,11 +101,13 @@ public class DemoApplication {
         }
     }
 
+    // Быстрое извлечение числа из строки /proc/meminfo
     private long parseKbValue(String line) {
         String[] parts = line.trim().split("\\s+");
         return parts.length >= 2 ? Long.parseLong(parts[1]) : 0;
     }
 
+    // Загрузка CPU через OperatingSystemMXBean
     private double calculateCpuUsage() {
         try {
             double systemCpuLoad = osBean.getCpuLoad();
@@ -124,17 +127,21 @@ public class DemoApplication {
         var formattedTime = now.format(DATE_FORMATTER);
 
         String tempStr = getCpuTemperature();
-        double cpuUsage = calculateCpuUsage();
         MemoryMetrics mem = getMemoryMetrics();
+        double cpuUsage = Math.round(calculateCpuUsage() * 10.0) / 10.0;
+        double ramUsageForDb = Math.round(mem.percentUsed() * 10.0) / 10.0;
 
         // --- СОХРАНЕНИЕ В SQLITE IN-MEMORY ---
         try {
             double tempVal = Double.parseDouble(tempStr.replace(" °C", "").replace(",", "."));
-            metricRepository.save(new ServerMetric(now, tempVal, cpuUsage, mem.percentUsed()));
+            metricRepository.save(new ServerMetric(now, tempVal, cpuUsage, ramUsageForDb));
         } catch (Exception ignored) {}
         // -------------------------------------
 
         if (emitters.isEmpty()) return;
+
+        //var metrics = new ServerMetrics(formattedTime, tempStr, cpuUsage, mem);
+
 
         var metrics = new ServerMetrics(formattedTime, tempStr, cpuUsage, mem);
 
